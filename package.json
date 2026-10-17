@@ -1,0 +1,9 @@
+{
+  "name": "wildfire-map",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Карта лесных пожаров мира (NASA FIRMS)",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}

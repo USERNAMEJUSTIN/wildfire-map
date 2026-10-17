@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: wildfire-map
+    runtime: node
+    plan: free
+    buildCommand: "true"
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: FIRMS_MAP_KEY
+        sync: false
