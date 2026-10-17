@@ -16,9 +16,12 @@
   }
   * { box-sizing:border-box; }
   html, body { height:100%; margin:0; }
-  body { font-family:"Onest", system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background:#aad3df; }
+  body { font-family:"Onest", system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background:#e6e6e6; }
+  @media (prefers-color-scheme: dark) { body, .leaflet-container { background:#1c1f23; } }
   #map { position:fixed; inset:0; }
-  .fire-canvas { pointer-events:none; }
+  .fire-canvas { position:absolute; inset:0; z-index:450; pointer-events:none; }
+  .leaflet-tile-pane { filter:grayscale(1) brightness(1.04) contrast(.92); }
+  @media (prefers-color-scheme: dark) { .leaflet-tile-pane { filter:grayscale(1) invert(1) brightness(.82) contrast(.9); } }
   .panel { position:fixed; z-index:1000; top:calc(12px + env(safe-area-inset-top,0px)); left:12px;
     width:min(330px, calc(100vw - 24px)); padding:16px 18px; border-radius:14px;
     background:var(--panel); backdrop-filter:blur(6px); box-shadow:0 6px 24px rgba(10,20,30,.18); }
@@ -43,7 +46,8 @@
   .dot { display:inline-block; border-radius:50%; background:var(--fire); box-shadow:0 0 0 3px rgba(232,24,12,.22); }
   .status { margin-top:10px; font-size:.78rem; color:var(--ink-soft); min-height:1em; }
   .status.err { color:var(--fire); }
-  .leaflet-popup-content { font-family:"Onest", system-ui, sans-serif; font-size:.85rem; line-height:1.45; }
+  .fire-tip { position:absolute; z-index:900; padding:10px 12px; border-radius:10px; background:var(--panel); color:var(--ink); font-size:.85rem; line-height:1.45; box-shadow:0 4px 16px rgba(0,0,0,.25); pointer-events:auto; }
+  .fire-tip[hidden] { display:none; }
   @media (max-width:520px) { .panel { padding:12px 14px; } .count { font-size:1.7rem; } }
 </style>
 </head>
@@ -108,44 +112,53 @@
 <script>
 const $ = id => document.getElementById(id);
 const nf = new Intl.NumberFormat("ru-RU");
-const dark = matchMedia("(prefers-color-scheme: dark)").matches;
 
 const map = L.map("map", { worldCopyJump:true, minZoom:2, zoomControl:false }).setView([20, 10], 2);
 L.control.zoom({ position:"bottomright" }).addTo(map);
-L.tileLayer(`https://{s}.basemaps.cartocdn.com/${dark ? "dark_all" : "light_all"}/{z}/{x}/{y}{r}.png`, {
-  attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a> | Пожары: <a href="https://firms.modaps.eosdis.nasa.gov/">NASA FIRMS</a>',
-  subdomains:"abcd", maxZoom:18,
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> | Пожары: <a href="https://firms.modaps.eosdis.nasa.gov/">NASA FIRMS</a>',
+  maxZoom:18,
 }).addTo(map);
 
-// Все точки рисуются на одном canvas — выдерживает сотни тысяч очагов
+// Все точки рисуются на одном canvas поверх карты — выдерживает сотни тысяч очагов
 const FireLayer = L.Layer.extend({
-  initialize() { this.rows = []; },
+  initialize() { this.rows = []; this._raf = 0; },
   onAdd(m) {
-    this._c = L.DomUtil.create("canvas", "fire-canvas leaflet-zoom-hide");
-    m.getPanes().overlayPane.appendChild(this._c);
-    m.on("moveend zoomend resize", this.draw, this); this.draw();
+    this._c = L.DomUtil.create("canvas", "fire-canvas", m.getContainer());
+    m.on("move zoomend resize viewreset", this.schedule, this);
+    m.on("zoomanim", this.hide, this);
+    this.draw();
   },
-  onRemove(m) { L.DomUtil.remove(this._c); m.off("moveend zoomend resize", this.draw, this); },
+  onRemove(m) { L.DomUtil.remove(this._c); m.off("move zoomend resize viewreset", this.schedule, this); m.off("zoomanim", this.hide, this); },
+  hide() { this._c.style.opacity = 0; },
+  schedule() { if (!this._raf) this._raf = requestAnimationFrame(() => { this._raf = 0; this.draw(); }); },
   setData(rows) { this.rows = rows.slice().sort((a, b) => a[2] - b[2]); this.draw(); },
-  radius(frp, z) { const b = Math.max(1.6, z * 0.75); return frp >= 100 ? b * 2.1 : frp >= 10 ? b * 1.45 : b; },
+  radius(frp, z) { const b = Math.max(1.8, z * 0.8); return frp >= 100 ? b * 2.1 : frp >= 10 ? b * 1.45 : b; },
   draw() {
     const m = this._map; if (!m) return;
     const size = m.getSize(), dpr = window.devicePixelRatio || 1, c = this._c;
-    L.DomUtil.setPosition(c, m.containerPointToLayerPoint([0, 0]));
-    c.width = size.x * dpr; c.height = size.y * dpr; c.style.width = size.x + "px"; c.style.height = size.y + "px";
-    const ctx = c.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (c.width !== size.x * dpr || c.height !== size.y * dpr) {
+      c.width = size.x * dpr; c.height = size.y * dpr; c.style.width = size.x + "px"; c.style.height = size.y + "px";
+    }
+    const ctx = c.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, size.x, size.y);
+    c.style.opacity = 1;
     const z = m.getZoom(), b = m.getBounds().pad(0.05), W = b.getWest(), E = b.getEast(), S = b.getSouth(), N = b.getNorth();
     const shifts = [-360, 0, 360].filter(s => E > -180 + s && W < 180 + s);
+    const halo = new Path2D(), low = new Path2D(), mid = new Path2D(), hot = new Path2D();
     for (const r of this.rows) {
       if (r[0] < S || r[0] > N) continue;
       for (const s of shifts) {
         const lon = r[1] + s; if (lon < W || lon > E) continue;
         const p = m.latLngToContainerPoint([r[0], lon]), rad = this.radius(r[2], z);
-        ctx.beginPath(); ctx.arc(p.x, p.y, rad * 2.2, 0, 6.2832); ctx.fillStyle = "rgba(232,24,12,.16)"; ctx.fill();
-        ctx.beginPath(); ctx.arc(p.x, p.y, rad, 0, 6.2832);
-        ctx.fillStyle = r[2] >= 100 ? "#9e0000" : r[2] >= 10 ? "#e8180c" : "#ff4a2e"; ctx.fill();
+        halo.moveTo(p.x + rad * 2.2, p.y); halo.arc(p.x, p.y, rad * 2.2, 0, 6.2832);
+        const t = r[2] >= 100 ? hot : r[2] >= 10 ? mid : low;
+        t.moveTo(p.x + rad, p.y); t.arc(p.x, p.y, rad, 0, 6.2832);
       }
     }
+    ctx.fillStyle = "rgba(232,24,12,.18)"; ctx.fill(halo);
+    ctx.fillStyle = "#ff4a2e"; ctx.fill(low);
+    ctx.fillStyle = "#e8180c"; ctx.fill(mid);
+    ctx.fillStyle = "#9e0000"; ctx.fill(hot);
   },
   nearest(ll) {
     const m = this._map, cp = m.latLngToContainerPoint(ll), z = m.getZoom(), b = m.getBounds();
@@ -163,14 +176,21 @@ const FireLayer = L.Layer.extend({
 const fires = new FireLayer().addTo(map);
 
 const CONF = { l:"низкая", n:"средняя", h:"высокая" };
+const tip = L.DomUtil.create("div", "fire-tip", map.getContainer());
+tip.hidden = true;
+L.DomEvent.disableClickPropagation(tip);
+map.on("movestart zoomstart", () => tip.hidden = true);
 map.on("click", e => {
-  const r = fires.nearest(e.latlng); if (!r) return;
+  const r = fires.nearest(e.latlng);
+  if (!r) { tip.hidden = true; return; }
   const conf = CONF[r[3]] || (r[3] !== "" ? r[3] + "%" : "—");
-  L.popup().setLatLng([r[0], r[1]]).setContent(
-    `<b>Очаг пожара</b><br>${r[4]}, ${r[5].slice(0,2)}:${r[5].slice(2)} UTC<br>` +
+  tip.innerHTML = `<b>Очаг пожара</b><br>${r[4]}, ${r[5].slice(0,2)}:${r[5].slice(2)} UTC<br>` +
     `Мощность: ${r[2].toFixed(1)} МВт<br>Достоверность: ${conf}<br>` +
-    `${r[6] === "N" ? "Ночной" : "Дневной"} снимок<br>${r[0].toFixed(3)}, ${r[1].toFixed(3)}`
-  ).openOn(map);
+    `${r[6] === "N" ? "Ночной" : "Дневной"} снимок<br>${r[0].toFixed(3)}, ${r[1].toFixed(3)}`;
+  const p = e.containerPoint, sz = map.getSize();
+  tip.hidden = false;
+  tip.style.left = Math.min(p.x + 12, sz.x - tip.offsetWidth - 8) + "px";
+  tip.style.top = Math.max(8, Math.min(p.y + 12, sz.y - tip.offsetHeight - 8)) + "px";
 });
 
 let mode = "live", liveTimer = null, busy = false;
